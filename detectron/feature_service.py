@@ -36,6 +36,7 @@ import base64
 import csv
 import timeit
 import json
+import jsonpickle
 
 
 from detectron.utils.io import cache_url
@@ -72,7 +73,7 @@ BOTTOM_UP_FIELDNAMES = ['image_id', 'image_w', 'image_h',
                         'num_boxes', 'boxes', 'features']
 
 FIELDNAMES = ['image_id', 'image_w', 'image_h', 'num_boxes', 
-            'boxes', 'features', 'object']
+              'boxes', 'features', 'object']
 
 def parse_args():
     parser = argparse.ArgumentParser(description='End-to-end inference')
@@ -101,7 +102,7 @@ def parse_args():
         '--min_bboxes',
         help=" min number of bboxes",
         type=int,
-        default=10
+        default=100
     )
     parser.add_argument(
         '--max_bboxes',
@@ -122,7 +123,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def get_detections_from_im(cfg, model, im, image_id, feat_blob_name,
+def get_detections_from_im(cfg, model, im, feat_blob_name,
                             MIN_BOXES, MAX_BOXES, conf_thresh=0.2, bboxes=None):
 
     with c2_utils.NamedCudaScope(0):
@@ -154,16 +155,13 @@ def get_detections_from_im(cfg, model, im, image_id, feat_blob_name,
             keep_boxes = np.argsort(max_conf)[::-1][:MAX_BOXES]
         objects = np.argmax(cls_prob[keep_boxes], axis=1)
 
-        cls_scores = np.array([x[objects[i]] for i, x in 
-                                             enumerate(cls_prob[keep_boxes])])
+
     return {
-        "image_id": image_id,
-        "image_h": np.size(im, 0),
-        "image_w": np.size(im, 1),
+        'image_h': np.size(im, 0),
+        'image_w': np.size(im, 1),
         'num_boxes': len(keep_boxes),
         'boxes': base64.b64encode(cls_boxes[keep_boxes]),
         'features': base64.b64encode(box_features[keep_boxes]),
-        'cls_scores': base64.b64encode(box_features[keep_boxes]),
         'object': base64.b64encode(objects)
     }
 
@@ -181,8 +179,6 @@ def setup_model(args):
 
 
 
-
-
 if __name__ == '__main__':
     workspace.GlobalInit(['caffe2', '--caffe2_log_level=0'])
     detectron.utils.logging.setup_logging(__name__)
@@ -191,21 +187,41 @@ if __name__ == '__main__':
 
     app = Flask(__name__)
 
-    @app.route('/api/detectron_feats' , methods=['POST'])
+    @app.route('/api/detectron_feats/' , methods=['POST'])
     def serve():
         r = request
-        import pdb;pdb.set_trace()
-        #start = timeit.default_timer()
 
-        #result = get_detections_from_im(cfg, model, im, 
-        #                                image_id, args.feat_name,
-        #                                args.min_bboxes, 
-        #                                args.max_bboxes,)
+        # convert string of image data to uint8
+        nparr = np.fromstring(r.data, np.uint8)
+	# decode image
+	img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+   
+        start = timeit.default_timer()
+
+        # Pass through detectron model
+        result = get_detections_from_im(cfg, 
+	                                model,
+					img, 
+                                        args.feat_name,
+                                        args.min_bboxes, 
+                                        args.max_bboxes,)
 
         end = timeit.default_timer()
         epoch_time = end - start
-        print('process image after {:.1f} s'.format(epoch_time))
-        return result
+
+	response = {'message': 'image received. size={}x{}'.format(img.shape[1],
+	                                                           img.shape[0]),
+	            'latency': epoch_time}
+
+        # Update return dictionary with results
+	response.update(result)
+
+        # encode response using jsonpickle
+        response_pickled = jsonpickle.encode(response)
+
+        return Response(response=response_pickled, 
+	                status=200, 
+			mimetype="application/json")
 
     app.run(host='0.0.0.0')
 
